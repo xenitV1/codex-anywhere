@@ -19,7 +19,22 @@ import {
   handleCodexModelsList,
 } from "./routes.js";
 
-export function startServer() {
+export async function startServer() {
+  // ─── Pre-flight: check if proxy already running on this port ──
+  // If a healthy proxy is already listening, exit cleanly so systemd
+  // treats this as success (no crash loop). Only check on Linux/macOS.
+  if (process.env.CODEX_PROXY_TEST !== "1") {
+    try {
+      const resp = await fetch(`http://localhost:${PORT}/health`);
+      if (resp.ok) {
+        console.log(`Proxy already running on port ${PORT} — exiting (healthy).`);
+        process.exit(0);
+      }
+    } catch {
+      // Port not in use — safe to start
+    }
+  }
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
     const pathname = url.pathname;

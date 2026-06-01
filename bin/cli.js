@@ -440,7 +440,7 @@ async function cmdInstall() {
   configureCodex(config);
 
   // ── Setup service
-  setupService(bunPath, platform);
+  await setupService(bunPath, platform);
 
   // ── Done
   console.log("");
@@ -508,6 +508,8 @@ async function cmdStart() {
   // Try systemctl first
   if (getPlatform() === "linux") {
     try {
+      // Clear any failed state from previous crash loop before starting
+      run("systemctl --user reset-failed codex-proxy.service", { silent: true, allowFail: true });
       run("systemctl --user start codex-proxy", { silent: true });
       await new Promise((r) => setTimeout(r, 1500));
       if (await isProxyRunning()) {
@@ -1187,7 +1189,7 @@ function configureCodex(config) {
   log("ok", `Updated model → ${model} in ${CODEX_CONFIG}`);
 }
 
-function setupService(bunPath, platform) {
+async function setupService(bunPath, platform) {
   ensureLogFile();
   if (platform === "linux") {
     const serviceDir = path.join(os.homedir(), ".config", "systemd", "user");
@@ -1197,6 +1199,8 @@ function setupService(bunPath, platform) {
       `[Unit]`,
       `Description=codex-proxy`,
       `After=network.target`,
+      `StartLimitIntervalSec=30`,
+      `StartLimitBurst=5`,
       ``,
       `[Service]`,
       `Type=simple`,
@@ -1216,9 +1220,19 @@ function setupService(bunPath, platform) {
     fs.writeFileSync(path.join(serviceDir, "codex-proxy.service"), service);
     run("systemctl --user daemon-reload", { silent: true });
     run("systemctl --user enable codex-proxy.service", { silent: true });
-    run("systemctl --user restart codex-proxy.service", { silent: true, allowFail: true });
 
-    log("ok", "systemd service installed (auto-starts on boot)");
+    // Only (re)start systemd service if proxy is NOT already running.
+    // If a manually-started proxy is healthy on the port, systemd will
+    // detect it via the pre-flight health check in server.ts and exit(0).
+    // But we avoid an unnecessary restart attempt.
+    const wasRunning = await isProxyRunning();
+    if (!wasRunning) {
+      run("systemctl --user reset-failed codex-proxy.service", { silent: true, allowFail: true });
+      run("systemctl --user restart codex-proxy.service", { silent: true, allowFail: true });
+      log("ok", "systemd service installed and started (auto-starts on boot)");
+    } else {
+      log("ok", "systemd service installed (proxy already running manually — will auto-start on next boot)");
+    }
 
   } else if (platform === "macos") {
     const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", "com.codex-proxy.plist");
