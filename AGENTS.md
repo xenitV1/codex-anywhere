@@ -30,7 +30,7 @@ bin/
   cli.js              (~1200 lines) Node.js CLI — install, config, start, stop, status, models, logs (npx compatible)
 src/
   config.ts           (~190 lines)  Loads config.toml + .env; CODEX_PROXY_TEST=1 for test isolation
-  converters.ts       (~200 lines)  Responses API <-> Chat Completions format converters
+  converters.ts       (~230 lines)  Responses API <-> Chat Completions format converters with JSON argument validation
   debug.ts            (~17 lines)   Debug logging gate (config.toml debug=true, DEBUG=1, CODEX_PROXY_DEBUG=1)
   collab-debug.ts     (~220 lines)  spawn_agent / collab diagnostics ([COLLAB] logs, namespace warnings)
   handler.ts          (~120 lines)  POST /v1/responses handler — main proxy logic
@@ -38,7 +38,7 @@ src/
   routes.ts           (~245 lines)  HTTP route handlers (health, stats, models, context, pass-through)
   server.ts           (114 lines)   HTTP server setup, route wiring, startup banner
   session.ts          (33 lines)    In-memory session token usage tracking
-  streaming.ts        (~320 lines)  SSE converter with immediate response.created, early tool dispatch, reasoning UI
+  streaming.ts        (~370 lines)  SSE converter with JSON validation/repair, strict content checks, and tool argument integrity
   version.ts          (~15 lines)   Package version from package.json
 test.ts               (88 lines)    Test runner — spawns proxy with CODEX_PROXY_TEST=1 on TEST_PORT
 tests/
@@ -48,6 +48,7 @@ tests/
   streaming.test.ts   (~95 lines)   Streaming: event order, early tool dispatch
   resilience.test.ts  (85 lines)    Error handling, tool filtering, pass-through, context tracking
   codex-compat.test.ts(132 lines)  Codex-specific: model catalog format, custom/namespace tools, headers
+  bohrium-compat.test.ts(~190 lines) Bohrium compat: multi-turn tool calls, JSON validation, streaming integrity
 ```
 
 ## Build, Test, and Development Commands
@@ -121,7 +122,7 @@ Codex CLI has `/v1/responses/compact` and `/v1/memories/trace_summarize` endpoin
 - **Real API:** Tests make actual HTTP requests to the configured upstream provider. Requires valid `API_KEY` in `.env`.
 - **Test structure:** Each test file exports a single `run()` function. Assertions use `assert()` / `assertEqual()` / `skip()` from helpers.
 - **Skipping:** Tests requiring an API key call `skip()` when `API_KEY` is empty. Tests always pass when no key is configured.
-- **Test suites:** endpoints (10 tests), api (11 tests), streaming (2 tests), resilience (4 tests), codex-compat (5 tests).
+- **Test suites:** endpoints (10 tests), api (11 tests), streaming (2 tests), resilience (4 tests), codex-compat (5 tests), bohrium-compat (22 tests).
 
 ## Configuration
 
@@ -184,6 +185,12 @@ Examples from this repo:
 1. Add case in `src/converters.ts:responsesToolsToChatTools()` switch
 2. Decide: convert to function, or filter out
 3. Add test case in `tests/codex-compat.test.ts` (mixed tools test)
+
+### Adding provider compatibility tests
+
+1. Add test cases in `tests/bohrium-compat.test.ts` (or create new provider-specific test file)
+2. Use the streaming converter directly to test event generation against upstream
+3. Focus on multi-turn tool calling, JSON validity, and response.completed integrity
 
 ### Adding a new provider
 

@@ -13,6 +13,49 @@ function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * Validate that a string is parseable JSON. Returns the parsed object
+ * or null if invalid. Used to verify tool call arguments integrity.
+ */
+function validateJSON(str: string): Record<string, any> | null {
+  if (!str) return null;
+  try {
+    const parsed = JSON.parse(str);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attempt to repair truncated JSON by closing unterminated strings and braces.
+ * Returns the repaired string or the original if repair is not possible.
+ */
+function repairJSON(str: string): string {
+  let s = str.trim();
+  if (!s) return "{}";
+  // Count open vs close braces
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (!inString) {
+      if (c === "{" || c === "[") depth++;
+      if (c === "}" || c === "]") depth--;
+    }
+  }
+  // If we're inside a string, close it
+  if (inString) s += '"';
+  // Close any unclosed braces
+  while (depth > 0) { s += "}"; depth--; }
+  return s;
+}
+
 interface ToolCallState {
   id: string;
   name: string;
@@ -105,8 +148,8 @@ export function streamChatToResponses(
     }));
   }
 
-  // Synthetic reasoning indicator for models that think before responding
-  if (isReasoning) openReasoningItem();
+  // Reasoning items are opened on-demand when upstream sends reasoning_content.
+  // No synthetic pre-open — avoid empty reasoning items when model produces no text.
 
   function ensureMessageItem() {
     closeReasoningItem();
@@ -213,6 +256,13 @@ export function streamChatToResponses(
   function sendCompletion() {
     closeReasoningItem();
 
+    // Guarantee at least one message item in output.
+    // Reasoning models may produce no visible text after thinking — without this,
+    // response.completed would have an empty output, causing last_agent_message=null.
+    if (!sentItemAdded && toolCalls.size === 0) {
+      ensureMessageItem();
+    }
+
     if (sentItemAdded) {
       res.write(sse("response.output_item.done", {
         type: "response.output_item.done",
@@ -245,6 +295,26 @@ export function streamChatToResponses(
     const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens || 0;
     const totalTokens = usage?.total_tokens || 0;
 
+    // Validate and repair tool call arguments before sending
+    const toolOutputs: any[] = [];
+    for (const tc of toolCalls.values()) {
+      if (!tc.done) continue;
+      let args = tc.arguments;
+      if (!validateJSON(args)) {
+        const repaired = repairJSON(args);
+        if (validateJSON(repaired)) {
+          proxyLog(`[PROXY] Repaired tool arguments for ${tc.name}: ${args.slice(0, 80)} -> ${repaired.slice(0, 80)}`);
+          args = repaired;
+        } else {
+          console.error(`[PROXY] Invalid tool arguments for ${tc.name}: ${args.slice(0, 200)}`);
+          args = "{}";
+        }
+      }
+      toolOutputs.push({
+        ...functionCallItem(tc, { arguments: args, status: "completed" }),
+      });
+    }
+
     res.write(sse("response.completed", {
       type: "response.completed",
       response: {
@@ -253,16 +323,16 @@ export function streamChatToResponses(
         status: "completed",
         model,
         output: [
-          ...(textContent ? [{
+          // Always include message item if it was added, even if textContent is empty
+          // (e.g. tool-only responses where the model didn't produce text)
+          ...(sentItemAdded ? [{
             type: "message",
             id: itemId,
             role: "assistant",
-            content: [{ type: "output_text", text: textContent }],
+            content: textContent ? [{ type: "output_text", text: textContent }] : [],
             status: "completed",
           }] : []),
-          ...[...toolCalls.values()].filter(t => t.done).map((tc) => ({
-            ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
-          })),
+          ...toolOutputs,
         ],
         usage: {
           input_tokens: inputTokens,
@@ -329,7 +399,8 @@ export function streamChatToResponses(
               }));
             }
 
-            if (delta.content) {
+            // Use strict check — empty string is valid content (e.g. Claude prefix chunk)
+            if (delta.content !== undefined && delta.content !== null) {
               ensureMessageItem();
               textContent += delta.content;
               res.write(sse("response.output_text.delta", {
@@ -347,7 +418,10 @@ export function streamChatToResponses(
                 const state = getOrCreateTool(idx);
                 if (tc.id) state.id = tc.id;
                 if (tc.function?.name) state.name = tc.function.name;
-                if (tc.function?.arguments) state.arguments += tc.function.arguments;
+                // Strict check — arguments fragment may be empty string
+                if (tc.function?.arguments !== undefined && tc.function?.arguments !== null) {
+                  state.arguments += tc.function.arguments;
+                }
                 ensureToolAdded(state);
               }
             }
@@ -355,8 +429,11 @@ export function streamChatToResponses(
             if (choice.finish_reason === "tool_calls") {
               finalizeAllTools();
             }
-          } catch {
-            // Skip malformed chunks
+          } catch (err) {
+            // Log malformed chunks for debugging
+            if (DEBUG) {
+              console.error(`[STREAM] Malformed chunk: ${data.slice(0, 200)}`, err);
+            }
           }
         }
       }
