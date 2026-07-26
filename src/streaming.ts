@@ -69,7 +69,13 @@ function normalizeToolArguments(name: string, args: string): string {
     proxyLog(`[PROXY] Repaired tool arguments for ${name}: ${args.slice(0, 80)} -> ${repaired.slice(0, 80)}`);
     return repaired;
   }
-  console.error(`[PROXY] Invalid tool arguments for ${name}: ${args.slice(0, 200)}`);
+  // Security: never log raw argument content in normal operation — may contain user data.
+  if (DEBUG) {
+    const redacted = args.length > 40 ? args.slice(0, 20) + "…" + args.slice(-20) : args;
+    console.error(`[PROXY] Invalid tool arguments for ${name} (len=${args.length}): ${redacted}`);
+  } else {
+    console.error(`[PROXY] Invalid tool arguments for ${name} (len=${args.length})`);
+  }
   return "{}";
 }
 
@@ -277,7 +283,11 @@ export function streamChatToResponses(
     // Guarantee at least one message item in output.
     // Reasoning models may produce no visible text after thinking — without this,
     // response.completed would have an empty output, causing last_agent_message=null.
-    if (!sentItemAdded && toolCalls.size === 0) {
+    // Base suppression on tools actually emitted/finalized, not toolCalls.size:
+    // getOrCreateTool() can create unnamed states from truncated fragments that
+    // finalize without output, and we must not let them suppress the fallback.
+    const hasEmittedTool = [...toolCalls.values()].some((tc) => tc.added);
+    if (!sentItemAdded && !hasEmittedTool) {
       ensureMessageItem();
     }
 
@@ -320,13 +330,47 @@ export function streamChatToResponses(
     const cachedTokens = usage?.prompt_tokens_details?.cached_tokens || 0;
     const totalTokens = usage?.total_tokens || 0;
 
-    const toolOutputs: any[] = [];
-    for (const tc of toolCalls.values()) {
-      if (!tc.done) continue;
-      toolOutputs.push({
-        ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
+    // Collect all emitted output items with their output_index, then sort by index
+    // so the terminal response matches the emitted event sequence.
+    const allOutputs: Array<{ index: number; item: Record<string, any> }> = [];
+
+    if (sentItemAdded) {
+      allOutputs.push({
+        index: messageOutputIndex,
+        item: {
+          type: "message",
+          id: itemId,
+          role: "assistant",
+          content: textContent ? [{ type: "output_text", text: textContent }] : [],
+          status: "completed",
+        },
       });
     }
+
+    if (reasoningClosed) {
+      allOutputs.push({
+        index: reasoningOutputIndex,
+        item: {
+          type: "reasoning",
+          id: reasoningItemId,
+          summary: [{ type: "summary_text", text: "" }],
+          status: "completed",
+        },
+      });
+    }
+
+    for (const tc of toolCalls.values()) {
+      if (!tc.done) continue;
+      allOutputs.push({
+        index: tc.outputIndex,
+        item: {
+          ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
+        },
+      });
+    }
+
+    // Sort by output_index to preserve emission order
+    allOutputs.sort((a, b) => a.index - b.index);
 
     res.write(sse("response.completed", {
       type: "response.completed",
@@ -335,18 +379,7 @@ export function streamChatToResponses(
         object: "response",
         status: "completed",
         model,
-        output: [
-          // Always include message item if it was added, even if textContent is empty
-          // (e.g. tool-only responses where the model didn't produce text)
-          ...(sentItemAdded ? [{
-            type: "message",
-            id: itemId,
-            role: "assistant",
-            content: textContent ? [{ type: "output_text", text: textContent }] : [],
-            status: "completed",
-          }] : []),
-          ...toolOutputs,
-        ],
+        output: allOutputs.map((o) => o.item),
         usage: {
           input_tokens: inputTokens,
           input_tokens_details: { cached_tokens: cachedTokens },
