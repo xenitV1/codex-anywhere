@@ -70,6 +70,13 @@ export async function handleResponsesRequest(
     ...(body.temperature != null ? { temperature: body.temperature } : {}),
   };
 
+  // Set max_tokens to prevent upstream truncation (defaults are often 4096).
+  // Known models: use models.dev max_output. Unknown models: cap at 16384 to
+  // avoid sending unrealistic values that upstreams reject (e.g. 128K to Claude).
+  const maxTokens = info?.max_output || Math.min(CONTEXT_WINDOW || 16384, 16384);
+  (chatRequest as any).max_tokens = maxTokens;
+  proxyLog(`[PROXY] max_tokens=${maxTokens} (known=${!!info?.max_output})`);
+
   proxyLog(
     `[PROXY] +0ms model=${model} msgs=${chatMessages.length} ` +
     `tools=${tools?.length || 0} stream=${stream}`,
