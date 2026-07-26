@@ -15,6 +15,21 @@ function forceString(val: unknown): string {
   return String(val);
 }
 
+/**
+ * Validate that a string is parseable JSON. Returns the parsed object
+ * or null if invalid. Used to verify tool call arguments integrity.
+ */
+function validateArgsJSON(str: string): Record<string, any> | null {
+  if (!str) return null;
+  try {
+    const parsed = JSON.parse(str);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function responsesInputToChatMessages(body: Record<string, any>): any[] {
   const messages: any[] = [];
   if (body.instructions) {
@@ -53,12 +68,31 @@ export function responsesInputToChatMessages(body: Record<string, any>): any[] {
         );
       }
       const content = parts.join("");
-      if (content) messages.push({ role, content });
+      // If the previous message is an assistant (e.g., created by a preceding
+      // function_call that was converted to an assistant message with tool_calls),
+      // merge content into it instead of creating a consecutive assistant message.
+      // Consecutive assistant messages are invalid in Chat Completions API and
+      // cause upstream providers to silently drop or mishandle the response.
+      if (content && role === "assistant" && messages.length > 0) {
+        const prev = messages[messages.length - 1];
+        if (prev.role === "assistant") {
+          prev.content = prev.content ? prev.content + content : content;
+        } else {
+          messages.push({ role, content });
+        }
+      } else if (content) {
+        messages.push({ role, content });
+      }
     } else if (item.type === "function_call") {
+      // Validate and sanitize arguments — reject malformed JSON
+      let fcArgs = item.arguments || "{}";
+      if (!validateArgsJSON(fcArgs)) {
+        fcArgs = "{}";
+      }
       const newToolCall = {
         id: item.call_id || item.id,
         type: "function" as const,
-        function: { name: item.name, arguments: item.arguments || "{}" },
+        function: { name: item.name, arguments: fcArgs },
       };
       // Merge into previous assistant message if possible (avoids consecutive assistant messages)
       const lastMsg = messages[messages.length - 1];
@@ -245,12 +279,17 @@ export function chatToResponses(
   if (msg?.tool_calls) {
     for (const tc of msg.tool_calls) {
       const name = tc.function.name;
+      // Validate arguments — fall back to "{}" if malformed
+      let ctrArgs = tc.function.arguments;
+      if (!validateArgsJSON(ctrArgs)) {
+        ctrArgs = "{}";
+      }
       const item: Record<string, any> = {
         type: "function_call",
         id: tc.id,
         call_id: tc.id,
         name,
-        arguments: tc.function.arguments,
+        arguments: ctrArgs,
       };
       const namespace = toolNamespaces[name];
       if (namespace) item.namespace = namespace;
@@ -260,6 +299,7 @@ export function chatToResponses(
   const inputTokens = chatResult.usage?.prompt_tokens || 0;
   const outputTokens = chatResult.usage?.completion_tokens || 0;
   const reasoningTokens = chatResult.usage?.completion_tokens_details?.reasoning_tokens || 0;
+  const cachedTokens = chatResult.usage?.prompt_tokens_details?.cached_tokens || 0;
   return {
     id: chatResult.id || "resp-" + Date.now(),
     object: "response",
@@ -267,8 +307,9 @@ export function chatToResponses(
     output,
     model: chatResult.model,
     usage: {
-      input_tokens: inputTokens,
+      input_tokens_details: { cached_tokens: cachedTokens },
       output_tokens: outputTokens,
+      input_tokens: inputTokens,
       output_tokens_details: { reasoning_tokens: reasoningTokens },
       total_tokens: chatResult.usage?.total_tokens || 0,
     },

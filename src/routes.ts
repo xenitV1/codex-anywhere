@@ -5,7 +5,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { UPSTREAM, KEY, AVAILABLE_MODELS, ACTIVE_MODEL } from "./config.js";
+import { UPSTREAM, KEY, AVAILABLE_MODELS, ACTIVE_MODEL, CONTEXT_WINDOW } from "./config.js";
 import { getModelInfo, getAllModels, getAllModelsUnfiltered, isCatalogReady } from "./models.js";
 import { sessionUsage } from "./session.js";
 import { readBody } from "./handler.js";
@@ -59,12 +59,12 @@ export function handleModelsList(res: ServerResponse, search: string) {
     .filter(([id]) => !search || id.toLowerCase().includes(search))
     .map(([id, info]) => ({
       id,
-      context_window: info.context_window,
+      context_window: info?.context_window || CONTEXT_WINDOW || 200000,
       max_output: info.max_output,
       reasoning: info.reasoning,
       tool_call: info.tool_call,
       provider: info.provider_name,
-      compact_threshold: Math.floor(info.context_window * 0.9),
+      compact_threshold: Math.floor((info?.context_window || CONTEXT_WINDOW || 200000) * 0.9),
     }))
     .sort((a, b) => b.context_window - a.context_window);
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -84,12 +84,12 @@ export function handleModelsFiltered(res: ServerResponse) {
   const entries = Object.entries(allFiltered)
     .map(([id, info]) => ({
       id,
-      context_window: info.context_window,
+      context_window: info?.context_window || CONTEXT_WINDOW || 200000,
       max_output: info.max_output,
       reasoning: info.reasoning,
       tool_call: info.tool_call,
       provider: info.provider_name,
-      compact_threshold: Math.floor(info.context_window * 0.9),
+      compact_threshold: Math.floor((info?.context_window || CONTEXT_WINDOW || 200000) * 0.9),
     }))
     .sort((a, b) => b.context_window - a.context_window);
 
@@ -110,17 +110,18 @@ export function handleModelInfo(res: ServerResponse, modelName: string) {
     res.end(JSON.stringify({ error: `Model '${modelName}' not found in catalog` }));
     return;
   }
-  const compactAt = Math.floor(info.context_window * 0.9);
+  const ctxWindow = info?.context_window || CONTEXT_WINDOW || 200000;
+  const compactAt = Math.floor(ctxWindow * 0.9);
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({
     model: modelName,
-    context_window: info.context_window,
+    context_window: info?.context_window || CONTEXT_WINDOW || 200000,
     max_output: info.max_output,
     reasoning: info.reasoning,
     tool_call: info.tool_call,
     provider: info.provider_name,
     compact_threshold: compactAt,
-    codex_config: `model_context_window = ${info.context_window}\nmodel_auto_compact_token_limit = ${compactAt}`,
+    codex_config: `model_context_window = ${info?.context_window || CONTEXT_WINDOW || 200000}\nmodel_auto_compact_token_limit = ${compactAt}`,
   }, null, 2));
 }
 
@@ -202,7 +203,7 @@ export function handleCodexModelsList(res: ServerResponse) {
   const models = Object.entries(allModels).map(([id, info]) => ({
     slug: id,
     display_name: formatDisplayName(id),
-    description: `${info.provider_name || "Unknown"} model — ${formatTokens(info.context_window)} context`,
+    description: `${info.provider_name || "Unknown"} model — ${formatTokens(info?.context_window || CONTEXT_WINDOW || 200000)} context`,
     default_reasoning_level: info.reasoning ? "medium" : null,
     supported_reasoning_levels: info.reasoning
       ? [
@@ -229,9 +230,9 @@ export function handleCodexModelsList(res: ServerResponse) {
     truncation_policy: { mode: "bytes", limit: 10000 },
     supports_parallel_tool_calls: info.tool_call,
     supports_image_detail_original: false,
-    context_window: info.context_window,
-    max_context_window: info.context_window,
-    auto_compact_token_limit: Math.floor(info.context_window * 0.9),
+    context_window: info?.context_window || CONTEXT_WINDOW || 200000,
+    max_context_window: info?.context_window || CONTEXT_WINDOW || 200000,
+    auto_compact_token_limit: Math.floor((info?.context_window || CONTEXT_WINDOW || 200000) * 0.9),
     effective_context_window_percent: 95,
     experimental_supported_tools: info.tool_call ? ["function"] : [],
     input_modalities: ["text"],

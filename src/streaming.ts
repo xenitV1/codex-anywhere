@@ -13,6 +13,72 @@ function sse(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * Validate that a string is parseable JSON. Returns the parsed object
+ * or null if invalid. Used to verify tool call arguments integrity.
+ */
+function validateJSON(str: string): Record<string, any> | null {
+  if (!str) return null;
+  try {
+    const parsed = JSON.parse(str);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attempt to repair truncated JSON by closing unterminated strings and braces.
+ * Returns the repaired string or the original if repair is not possible.
+ */
+function repairJSON(str: string): string {
+  let s = str.trim();
+  if (!s) return "{}";
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === "\\") { escaped = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (!inString) {
+      if (c === "{" || c === "[") {
+        stack.push(c);
+      } else if (c === "}" || c === "]") {
+        const opener = c === "}" ? "{" : "[";
+        if (stack[stack.length - 1] === opener) {
+          stack.pop();
+        }
+      }
+    }
+  }
+  if (inString) s += '"';
+  while (stack.length > 0) {
+    const opener = stack.pop();
+    s += opener === "{" ? "}" : "]";
+  }
+  return s;
+}
+
+function normalizeToolArguments(name: string, args: string): string {
+  if (validateJSON(args)) return args;
+  const repaired = repairJSON(args);
+  if (validateJSON(repaired)) {
+    proxyLog(`[PROXY] Repaired tool arguments for ${name}: ${args.slice(0, 80)} -> ${repaired.slice(0, 80)}`);
+    return repaired;
+  }
+  // Security: never log raw argument content in normal operation — may contain user data.
+  if (DEBUG) {
+    const redacted = args.length > 40 ? args.slice(0, 20) + "…" + args.slice(-20) : args;
+    console.error(`[PROXY] Invalid tool arguments for ${name} (len=${args.length}): ${redacted}`);
+  } else {
+    console.error(`[PROXY] Invalid tool arguments for ${name} (len=${args.length})`);
+  }
+  return "{}";
+}
+
 interface ToolCallState {
   id: string;
   name: string;
@@ -105,8 +171,8 @@ export function streamChatToResponses(
     }));
   }
 
-  // Synthetic reasoning indicator for models that think before responding
-  if (isReasoning) openReasoningItem();
+  // Reasoning items are opened on-demand when upstream sends reasoning_content.
+  // No synthetic pre-open — avoid empty reasoning items when model produces no text.
 
   function ensureMessageItem() {
     closeReasoningItem();
@@ -182,6 +248,7 @@ export function streamChatToResponses(
     if (state.done) return;
     if (!state.added && state.name) ensureToolAdded(state);
     if (!state.added) return;
+    state.arguments = normalizeToolArguments(state.name, state.arguments);
     state.done = true;
     const item = functionCallItem(state, { arguments: state.arguments, status: "completed" });
     res.write(sse("response.output_item.done", {
@@ -213,7 +280,24 @@ export function streamChatToResponses(
   function sendCompletion() {
     closeReasoningItem();
 
+    // Guarantee at least one message item in output.
+    // Reasoning models may produce no visible text after thinking — without this,
+    // response.completed would have an empty output, causing last_agent_message=null.
+    // Base suppression on tools actually emitted/finalized, not toolCalls.size:
+    // getOrCreateTool() can create unnamed states from truncated fragments that
+    // finalize without output, and we must not let them suppress the fallback.
+    const hasEmittedTool = [...toolCalls.values()].some((tc) => tc.added);
+    if (!sentItemAdded && !hasEmittedTool) {
+      ensureMessageItem();
+    }
+
     if (sentItemAdded) {
+      // Send response.output_text.done before closing the message item
+      res.write(sse("response.output_text.done", {
+        type: "response.output_text.done",
+        output_index: messageOutputIndex,
+        content_index: 0,
+      }));
       res.write(sse("response.output_item.done", {
         type: "response.output_item.done",
         output_index: messageOutputIndex,
@@ -243,7 +327,50 @@ export function streamChatToResponses(
     const inputTokens = usage?.prompt_tokens || 0;
     const outputTokens = usage?.completion_tokens || 0;
     const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens || 0;
+    const cachedTokens = usage?.prompt_tokens_details?.cached_tokens || 0;
     const totalTokens = usage?.total_tokens || 0;
+
+    // Collect all emitted output items with their output_index, then sort by index
+    // so the terminal response matches the emitted event sequence.
+    const allOutputs: Array<{ index: number; item: Record<string, any> }> = [];
+
+    if (sentItemAdded) {
+      allOutputs.push({
+        index: messageOutputIndex,
+        item: {
+          type: "message",
+          id: itemId,
+          role: "assistant",
+          content: textContent ? [{ type: "output_text", text: textContent }] : [],
+          status: "completed",
+        },
+      });
+    }
+
+    if (reasoningClosed) {
+      allOutputs.push({
+        index: reasoningOutputIndex,
+        item: {
+          type: "reasoning",
+          id: reasoningItemId,
+          summary: [{ type: "summary_text", text: "" }],
+          status: "completed",
+        },
+      });
+    }
+
+    for (const tc of toolCalls.values()) {
+      if (!tc.done) continue;
+      allOutputs.push({
+        index: tc.outputIndex,
+        item: {
+          ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
+        },
+      });
+    }
+
+    // Sort by output_index to preserve emission order
+    allOutputs.sort((a, b) => a.index - b.index);
 
     res.write(sse("response.completed", {
       type: "response.completed",
@@ -252,20 +379,10 @@ export function streamChatToResponses(
         object: "response",
         status: "completed",
         model,
-        output: [
-          ...(textContent ? [{
-            type: "message",
-            id: itemId,
-            role: "assistant",
-            content: [{ type: "output_text", text: textContent }],
-            status: "completed",
-          }] : []),
-          ...[...toolCalls.values()].filter(t => t.done).map((tc) => ({
-            ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
-          })),
-        ],
+        output: allOutputs.map((o) => o.item),
         usage: {
           input_tokens: inputTokens,
+          input_tokens_details: { cached_tokens: cachedTokens },
           output_tokens: outputTokens,
           output_tokens_details: { reasoning_tokens: reasoningTokens },
           total_tokens: totalTokens,
@@ -329,7 +446,8 @@ export function streamChatToResponses(
               }));
             }
 
-            if (delta.content) {
+            // Use strict check — empty string is valid content (e.g. Claude prefix chunk)
+            if (delta.content !== undefined && delta.content !== null) {
               ensureMessageItem();
               textContent += delta.content;
               res.write(sse("response.output_text.delta", {
@@ -347,7 +465,10 @@ export function streamChatToResponses(
                 const state = getOrCreateTool(idx);
                 if (tc.id) state.id = tc.id;
                 if (tc.function?.name) state.name = tc.function.name;
-                if (tc.function?.arguments) state.arguments += tc.function.arguments;
+                // Strict check — arguments fragment may be empty string
+                if (tc.function?.arguments !== undefined && tc.function?.arguments !== null) {
+                  state.arguments += tc.function.arguments;
+                }
                 ensureToolAdded(state);
               }
             }
@@ -355,8 +476,11 @@ export function streamChatToResponses(
             if (choice.finish_reason === "tool_calls") {
               finalizeAllTools();
             }
-          } catch {
-            // Skip malformed chunks
+          } catch (err) {
+            // Log malformed chunks for debugging
+            if (DEBUG) {
+              console.error(`[STREAM] Malformed chunk: ${data.slice(0, 200)}`, err);
+            }
           }
         }
       }
