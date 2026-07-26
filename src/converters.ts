@@ -299,6 +299,7 @@ export function chatToResponses(
   const inputTokens = chatResult.usage?.prompt_tokens || 0;
   const outputTokens = chatResult.usage?.completion_tokens || 0;
   const reasoningTokens = chatResult.usage?.completion_tokens_details?.reasoning_tokens || 0;
+  const cachedTokens = chatResult.usage?.prompt_tokens_details?.cached_tokens || 0;
   return {
     id: chatResult.id || "resp-" + Date.now(),
     object: "response",
@@ -306,8 +307,9 @@ export function chatToResponses(
     output,
     model: chatResult.model,
     usage: {
-      input_tokens: inputTokens,
+      input_tokens_details: { cached_tokens: cachedTokens },
       output_tokens: outputTokens,
+      input_tokens: inputTokens,
       output_tokens_details: { reasoning_tokens: reasoningTokens },
       total_tokens: chatResult.usage?.total_tokens || 0,
     },

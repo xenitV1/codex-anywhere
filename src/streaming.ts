@@ -282,6 +282,12 @@ export function streamChatToResponses(
     }
 
     if (sentItemAdded) {
+      // Send response.output_text.done before closing the message item
+      res.write(sse("response.output_text.done", {
+        type: "response.output_text.done",
+        output_index: messageOutputIndex,
+        content_index: 0,
+      }));
       res.write(sse("response.output_item.done", {
         type: "response.output_item.done",
         output_index: messageOutputIndex,
@@ -311,6 +317,7 @@ export function streamChatToResponses(
     const inputTokens = usage?.prompt_tokens || 0;
     const outputTokens = usage?.completion_tokens || 0;
     const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens || 0;
+    const cachedTokens = usage?.prompt_tokens_details?.cached_tokens || 0;
     const totalTokens = usage?.total_tokens || 0;
 
     const toolOutputs: any[] = [];
@@ -342,6 +349,7 @@ export function streamChatToResponses(
         ],
         usage: {
           input_tokens: inputTokens,
+          input_tokens_details: { cached_tokens: cachedTokens },
           output_tokens: outputTokens,
           output_tokens_details: { reasoning_tokens: reasoningTokens },
           total_tokens: totalTokens,
