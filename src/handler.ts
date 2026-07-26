@@ -6,7 +6,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { UPSTREAM, KEY, FILTER_NON_FUNCTION_TOOLS, ACTIVE_MODEL, AVAILABLE_MODELS, resolveModel } from "./config.js";
+import { UPSTREAM, KEY, FILTER_NON_FUNCTION_TOOLS, ACTIVE_MODEL, AVAILABLE_MODELS, resolveModel, CONTEXT_WINDOW } from "./config.js";
 import { getModelInfo } from "./models.js";
 import { updateSessionUsage } from "./session.js";
 import { responsesInputToChatMessages, responsesToolsToChatTools, chatToResponses } from "./converters.js";
@@ -60,6 +60,7 @@ export async function handleResponsesRequest(
     proxyLog(`[ALIAS] "${requestedModel}" → "${model}"`);
   }
 
+  const info = getModelInfo(model);
   const chatRequest: Record<string, unknown> = {
     model,
     messages: chatMessages,
@@ -78,16 +79,16 @@ export async function handleResponsesRequest(
     proxyLog(`[TOOLS] ${flatToolNames.join(", ")}`);
   }
   logCollabToolsRequest(body.tools, toolNamespaces, flatToolNames);
-  const info = getModelInfo(model);
+  const ctxWindow = info?.context_window || CONTEXT_WINDOW || 200000;
+  const compactAt = Math.floor(ctxWindow * 0.9);
   if (info) {
-    const compactAt = Math.floor(info.context_window * 0.9);
     proxyLog(
       `[MODEL] ${model}: context=${formatTokens(info.context_window)} ` +
       `output=${formatTokens(info.max_output)} compact_at=${formatTokens(compactAt)} ` +
       `reasoning=${info.reasoning} tool_call=${info.tool_call}`,
     );
   } else {
-    proxyLog(`[MODEL] ${model}: unknown — add to models.dev or MODELS_JSON`);
+    proxyLog(`[MODEL] ${model}: unknown — using config context_window=${formatTokens(ctxWindow)} compact_at=${formatTokens(compactAt)}`);
   }
 
   const upstreamHeaders: Record<string, string> = {

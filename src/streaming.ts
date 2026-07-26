@@ -148,8 +148,8 @@ export function streamChatToResponses(
     }));
   }
 
-  // Synthetic reasoning indicator for models that think before responding
-  if (isReasoning) openReasoningItem();
+  // Reasoning items are opened on-demand when upstream sends reasoning_content.
+  // No synthetic pre-open — avoid empty reasoning items when model produces no text.
 
   function ensureMessageItem() {
     closeReasoningItem();
@@ -255,6 +255,13 @@ export function streamChatToResponses(
 
   function sendCompletion() {
     closeReasoningItem();
+
+    // Guarantee at least one message item in output.
+    // Reasoning models may produce no visible text after thinking — without this,
+    // response.completed would have an empty output, causing last_agent_message=null.
+    if (!sentItemAdded && toolCalls.size === 0) {
+      ensureMessageItem();
+    }
 
     if (sentItemAdded) {
       res.write(sse("response.output_item.done", {
