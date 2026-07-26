@@ -68,7 +68,21 @@ export function responsesInputToChatMessages(body: Record<string, any>): any[] {
         );
       }
       const content = parts.join("");
-      if (content) messages.push({ role, content });
+      // If the previous message is an assistant (e.g., created by a preceding
+      // function_call that was converted to an assistant message with tool_calls),
+      // merge content into it instead of creating a consecutive assistant message.
+      // Consecutive assistant messages are invalid in Chat Completions API and
+      // cause upstream providers to silently drop or mishandle the response.
+      if (content && role === "assistant" && messages.length > 0) {
+        const prev = messages[messages.length - 1];
+        if (prev.role === "assistant") {
+          prev.content = prev.content ? prev.content + content : content;
+        } else {
+          messages.push({ role, content });
+        }
+      } else if (content) {
+        messages.push({ role, content });
+      }
     } else if (item.type === "function_call") {
       // Validate and sanitize arguments — reject malformed JSON
       let fcArgs = item.arguments || "{}";
