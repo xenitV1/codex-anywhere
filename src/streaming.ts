@@ -21,7 +21,7 @@ function validateJSON(str: string): Record<string, any> | null {
   if (!str) return null;
   try {
     const parsed = JSON.parse(str);
-    if (typeof parsed !== "object" || parsed === null) return null;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
     return parsed;
   } catch {
     return null;
@@ -35,8 +35,7 @@ function validateJSON(str: string): Record<string, any> | null {
 function repairJSON(str: string): string {
   let s = str.trim();
   if (!s) return "{}";
-  // Count open vs close braces
-  let depth = 0;
+  const stack: string[] = [];
   let inString = false;
   let escaped = false;
   for (let i = 0; i < s.length; i++) {
@@ -45,15 +44,33 @@ function repairJSON(str: string): string {
     if (c === "\\") { escaped = true; continue; }
     if (c === '"') { inString = !inString; continue; }
     if (!inString) {
-      if (c === "{" || c === "[") depth++;
-      if (c === "}" || c === "]") depth--;
+      if (c === "{" || c === "[") {
+        stack.push(c);
+      } else if (c === "}" || c === "]") {
+        const opener = c === "}" ? "{" : "[";
+        if (stack[stack.length - 1] === opener) {
+          stack.pop();
+        }
+      }
     }
   }
-  // If we're inside a string, close it
   if (inString) s += '"';
-  // Close any unclosed braces
-  while (depth > 0) { s += "}"; depth--; }
+  while (stack.length > 0) {
+    const opener = stack.pop();
+    s += opener === "{" ? "}" : "]";
+  }
   return s;
+}
+
+function normalizeToolArguments(name: string, args: string): string {
+  if (validateJSON(args)) return args;
+  const repaired = repairJSON(args);
+  if (validateJSON(repaired)) {
+    proxyLog(`[PROXY] Repaired tool arguments for ${name}: ${args.slice(0, 80)} -> ${repaired.slice(0, 80)}`);
+    return repaired;
+  }
+  console.error(`[PROXY] Invalid tool arguments for ${name}: ${args.slice(0, 200)}`);
+  return "{}";
 }
 
 interface ToolCallState {
@@ -225,6 +242,7 @@ export function streamChatToResponses(
     if (state.done) return;
     if (!state.added && state.name) ensureToolAdded(state);
     if (!state.added) return;
+    state.arguments = normalizeToolArguments(state.name, state.arguments);
     state.done = true;
     const item = functionCallItem(state, { arguments: state.arguments, status: "completed" });
     res.write(sse("response.output_item.done", {
@@ -295,23 +313,11 @@ export function streamChatToResponses(
     const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens || 0;
     const totalTokens = usage?.total_tokens || 0;
 
-    // Validate and repair tool call arguments before sending
     const toolOutputs: any[] = [];
     for (const tc of toolCalls.values()) {
       if (!tc.done) continue;
-      let args = tc.arguments;
-      if (!validateJSON(args)) {
-        const repaired = repairJSON(args);
-        if (validateJSON(repaired)) {
-          proxyLog(`[PROXY] Repaired tool arguments for ${tc.name}: ${args.slice(0, 80)} -> ${repaired.slice(0, 80)}`);
-          args = repaired;
-        } else {
-          console.error(`[PROXY] Invalid tool arguments for ${tc.name}: ${args.slice(0, 200)}`);
-          args = "{}";
-        }
-      }
       toolOutputs.push({
-        ...functionCallItem(tc, { arguments: args, status: "completed" }),
+        ...functionCallItem(tc, { arguments: tc.arguments, status: "completed" }),
       });
     }
 

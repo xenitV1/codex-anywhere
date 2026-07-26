@@ -23,7 +23,7 @@ function validateArgsJSON(str: string): Record<string, any> | null {
   if (!str) return null;
   try {
     const parsed = JSON.parse(str);
-    if (typeof parsed !== "object" || parsed === null) return null;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
     return parsed;
   } catch {
     return null;

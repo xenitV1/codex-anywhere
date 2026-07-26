@@ -146,7 +146,7 @@ Set `CODEX_PROXY_TEST=1` to let `.env` override config.toml (used by `test.ts`).
 ### Streaming Performance (`src/streaming.ts`)
 
 - Sends `response.created` immediately (before upstream first byte)
-- Reasoning models: synthetic `reasoning` output item + passthrough of `reasoning_content` deltas
+- Reasoning models: open a `reasoning` output item on demand when upstream emits `reasoning_content` + passthrough of `reasoning_content` deltas
 - Tool calls: `output_item.added` on first chunk, `output_item.done` on `finish_reason: tool_calls` (not stream end)
 - Verbose timing logs when `debug = true` in `~/.codex-proxy/config.toml`, or `DEBUG=1` / `CODEX_PROXY_DEBUG=1`
 
