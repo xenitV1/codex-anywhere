@@ -15,6 +15,21 @@ function forceString(val: unknown): string {
   return String(val);
 }
 
+/**
+ * Validate that a string is parseable JSON. Returns the parsed object
+ * or null if invalid. Used to verify tool call arguments integrity.
+ */
+function validateArgsJSON(str: string): Record<string, any> | null {
+  if (!str) return null;
+  try {
+    const parsed = JSON.parse(str);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function responsesInputToChatMessages(body: Record<string, any>): any[] {
   const messages: any[] = [];
   if (body.instructions) {
@@ -55,10 +70,15 @@ export function responsesInputToChatMessages(body: Record<string, any>): any[] {
       const content = parts.join("");
       if (content) messages.push({ role, content });
     } else if (item.type === "function_call") {
+      // Validate and sanitize arguments — reject malformed JSON
+      let fcArgs = item.arguments || "{}";
+      if (!validateArgsJSON(fcArgs)) {
+        fcArgs = "{}";
+      }
       const newToolCall = {
         id: item.call_id || item.id,
         type: "function" as const,
-        function: { name: item.name, arguments: item.arguments || "{}" },
+        function: { name: item.name, arguments: fcArgs },
       };
       // Merge into previous assistant message if possible (avoids consecutive assistant messages)
       const lastMsg = messages[messages.length - 1];
@@ -245,12 +265,17 @@ export function chatToResponses(
   if (msg?.tool_calls) {
     for (const tc of msg.tool_calls) {
       const name = tc.function.name;
+      // Validate arguments — fall back to "{}" if malformed
+      let ctrArgs = tc.function.arguments;
+      if (!validateArgsJSON(ctrArgs)) {
+        ctrArgs = "{}";
+      }
       const item: Record<string, any> = {
         type: "function_call",
         id: tc.id,
         call_id: tc.id,
         name,
-        arguments: tc.function.arguments,
+        arguments: ctrArgs,
       };
       const namespace = toolNamespaces[name];
       if (namespace) item.namespace = namespace;
